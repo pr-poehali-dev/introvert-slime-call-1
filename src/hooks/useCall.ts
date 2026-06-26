@@ -22,6 +22,36 @@ type Status = 'idle' | 'connecting' | 'in-call' | 'kicked' | 'closed' | 'error';
 const newId = () =>
   'u-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
+// Перемещает Opus на первое место в SDP и включает стерео + максимальный битрейт
+const preferOpus = (sdp: string): string => {
+  const lines = sdp.split('\r\n');
+  const mLineIdx = lines.findIndex((l) => l.startsWith('m=audio'));
+  if (mLineIdx === -1) return sdp;
+
+  // найти payload type Opus
+  const opusLine = lines.find((l) => /^a=rtpmap:\d+ opus\/48000/i.test(l));
+  if (!opusLine) return sdp;
+  const opusPt = opusLine.match(/^a=rtpmap:(\d+)/)?.[1];
+  if (!opusPt) return sdp;
+
+  // переставить opus payload первым в m= строке
+  const mParts = lines[mLineIdx].split(' ');
+  const filtered = mParts.filter((p) => p !== opusPt);
+  filtered.splice(3, 0, opusPt);
+  lines[mLineIdx] = filtered.join(' ');
+
+  // добавить/заменить fmtp для Opus: стерео, cbr off, maxaveragebitrate
+  const fmtpIdx = lines.findIndex((l) => l.startsWith(`a=fmtp:${opusPt}`));
+  const fmtp = `a=fmtp:${opusPt} minptime=10;useinbandfec=1;stereo=0;maxaveragebitrate=96000;cbr=0`;
+  if (fmtpIdx !== -1) {
+    lines[fmtpIdx] = fmtp;
+  } else {
+    const rtpmapIdx = lines.findIndex((l) => l.startsWith(`a=rtpmap:${opusPt}`));
+    if (rtpmapIdx !== -1) lines.splice(rtpmapIdx + 1, 0, fmtp);
+  }
+  return lines.join('\r\n');
+};
+
 const post = async (payload: Record<string, unknown>) => {
   const res = await fetch(API, {
     method: 'POST',
@@ -88,23 +118,26 @@ export function useCall() {
       if (!el) {
         el = document.createElement('audio');
         el.autoplay = true;
+        el.volume = 1.0;
         audioEls.current.set(remoteId, el);
         document.body.appendChild(el);
       }
       el.srcObject = e.streams[0];
+      el.play().catch(() => {});
     };
 
     if (initiator) {
       pc.onnegotiationneeded = async () => {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+        const offer = await pc.createOffer({ offerToReceiveAudio: true });
+        const sdp = preferOpus(offer.sdp ?? '');
+        await pc.setLocalDescription({ type: offer.type, sdp });
         post({
           action: 'signal',
           code: codeRef.current,
           from: userId.current,
           to: remoteId,
           kind: 'offer',
-          payload: JSON.stringify(offer),
+          payload: JSON.stringify({ type: offer.type, sdp }),
         });
       };
     }
@@ -118,14 +151,15 @@ export function useCall() {
         const pc = createPeer(sig.from, false);
         await pc.setRemoteDescription(new RTCSessionDescription(data));
         const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        const sdp = preferOpus(answer.sdp ?? '');
+        await pc.setLocalDescription({ type: answer.type, sdp });
         post({
           action: 'signal',
           code: codeRef.current,
           from: userId.current,
           to: sig.from,
           kind: 'answer',
-          payload: JSON.stringify(answer),
+          payload: JSON.stringify({ type: answer.type, sdp }),
         });
       } else if (sig.kind === 'answer') {
         const pc = pcs.current.get(sig.from);
@@ -184,7 +218,17 @@ export function useCall() {
   }, [cleanup, createPeer, handleSignal]);
 
   const initMedia = useCallback(async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: 48000,
+        channelCount: 1,
+        latency: 0,
+      },
+      video: false,
+    });
     localStream.current = stream;
     stream.getAudioTracks().forEach((t) => (t.enabled = true));
   }, []);
