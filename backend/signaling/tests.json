@@ -1,0 +1,27 @@
+{
+  "tests": [
+    {
+      "name": "Create room",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "create", "userId": "test-host-1", "name": "Хост"},
+      "expectedStatus": 200,
+      "expectedBody": {"code": "string"},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Join missing room",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "join", "code": "ZZZZZZZZZZZZ", "userId": "test-guest-1", "name": "Гость"},
+      "expectedStatus": 404
+    },
+    {
+      "name": "Unknown action",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "nope"},
+      "expectedStatus": 400
+    }
+  ]
+}

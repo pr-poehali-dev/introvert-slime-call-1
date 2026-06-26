@@ -1,0 +1,31 @@
+CREATE TABLE IF NOT EXISTS rooms (
+    code VARCHAR(12) PRIMARY KEY,
+    host_id VARCHAR(40) NOT NULL,
+    closed BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS participants (
+    id VARCHAR(40) PRIMARY KEY,
+    room_code VARCHAR(12) NOT NULL,
+    name VARCHAR(40) NOT NULL,
+    is_host BOOLEAN DEFAULT FALSE,
+    muted BOOLEAN DEFAULT FALSE,
+    kicked BOOLEAN DEFAULT FALSE,
+    active BOOLEAN DEFAULT TRUE,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS signals (
+    id SERIAL PRIMARY KEY,
+    room_code VARCHAR(12) NOT NULL,
+    from_id VARCHAR(40) NOT NULL,
+    to_id VARCHAR(40) NOT NULL,
+    kind VARCHAR(20) NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_signals_to ON signals(room_code, to_id, id);
+CREATE INDEX IF NOT EXISTS idx_participants_room ON participants(room_code);
