@@ -22,25 +22,18 @@ type Status = 'idle' | 'connecting' | 'in-call' | 'kicked' | 'closed' | 'error';
 const newId = () =>
   'u-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
-// Перемещает Opus на первое место в SDP и включает стерео + максимальный битрейт
 const preferOpus = (sdp: string): string => {
   const lines = sdp.split('\r\n');
   const mLineIdx = lines.findIndex((l) => l.startsWith('m=audio'));
   if (mLineIdx === -1) return sdp;
-
-  // найти payload type Opus
   const opusLine = lines.find((l) => /^a=rtpmap:\d+ opus\/48000/i.test(l));
   if (!opusLine) return sdp;
   const opusPt = opusLine.match(/^a=rtpmap:(\d+)/)?.[1];
   if (!opusPt) return sdp;
-
-  // переставить opus payload первым в m= строке
   const mParts = lines[mLineIdx].split(' ');
   const filtered = mParts.filter((p) => p !== opusPt);
   filtered.splice(3, 0, opusPt);
   lines[mLineIdx] = filtered.join(' ');
-
-  // добавить/заменить fmtp для Opus: стерео, cbr off, maxaveragebitrate
   const fmtpIdx = lines.findIndex((l) => l.startsWith(`a=fmtp:${opusPt}`));
   const fmtp = `a=fmtp:${opusPt} minptime=10;useinbandfec=1;stereo=0;maxaveragebitrate=96000;cbr=0`;
   if (fmtpIdx !== -1) {
@@ -67,35 +60,46 @@ export function useCall() {
   const [isHost, setIsHost] = useState(false);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [micOn, setMicOn] = useState(true);
+  const [sharingScreen, setSharingScreen] = useState(false);
+  const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
+  const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
+  const [remoteScreenName, setRemoteScreenName] = useState('');
 
   const userId = useRef(newId());
   const localStream = useRef<MediaStream | null>(null);
+  const screenStream = useRef<MediaStream | null>(null);
   const pcs = useRef<Map<string, RTCPeerConnection>>(new Map());
   const audioEls = useRef<Map<string, HTMLAudioElement>>(new Map());
   const lastSignalId = useRef(0);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const codeRef = useRef('');
   const stopped = useRef(false);
+  const peersRef = useRef<Peer[]>([]);
 
   const cleanup = useCallback(() => {
     stopped.current = true;
     if (pollTimer.current) clearInterval(pollTimer.current);
     pcs.current.forEach((pc) => pc.close());
     pcs.current.clear();
-    audioEls.current.forEach((el) => {
-      el.srcObject = null;
-      el.remove();
-    });
+    audioEls.current.forEach((el) => { el.srcObject = null; el.remove(); });
     audioEls.current.clear();
     localStream.current?.getTracks().forEach((t) => t.stop());
     localStream.current = null;
+    screenStream.current?.getTracks().forEach((t) => t.stop());
+    screenStream.current = null;
+    setSharingScreen(false);
+    setLocalScreenStream(null);
+    setRemoteScreenStream(null);
+    setRemoteScreenName('');
   }, []);
 
   const createPeer = useCallback((remoteId: string, initiator: boolean) => {
     if (pcs.current.has(remoteId)) return pcs.current.get(remoteId)!;
+
     const pc = new RTCPeerConnection(ICE_SERVERS);
     pcs.current.set(remoteId, pc);
 
+    // добавляем аудио-треки
     localStream.current?.getTracks().forEach((track) => {
       pc.addTrack(track, localStream.current!);
     });
@@ -114,21 +118,38 @@ export function useCall() {
     };
 
     pc.ontrack = (e) => {
-      let el = audioEls.current.get(remoteId);
-      if (!el) {
-        el = document.createElement('audio');
-        el.autoplay = true;
-        el.volume = 1.0;
-        audioEls.current.set(remoteId, el);
-        document.body.appendChild(el);
+      const track = e.track;
+      const stream = e.streams[0];
+
+      if (track.kind === 'audio') {
+        let el = audioEls.current.get(remoteId);
+        if (!el) {
+          el = document.createElement('audio');
+          el.autoplay = true;
+          el.volume = 1.0;
+          audioEls.current.set(remoteId, el);
+          document.body.appendChild(el);
+        }
+        el.srcObject = stream;
+        el.play().catch(() => {});
+        return;
       }
-      el.srcObject = e.streams[0];
-      el.play().catch(() => {});
+
+      // video = screen share от remoteId
+      if (track.kind === 'video') {
+        const peer = peersRef.current.find((p) => p.id === remoteId);
+        setRemoteScreenName(peer?.name ?? 'Участник');
+        setRemoteScreenStream(stream);
+        track.onended = () => {
+          setRemoteScreenStream(null);
+          setRemoteScreenName('');
+        };
+      }
     };
 
     if (initiator) {
       pc.onnegotiationneeded = async () => {
-        const offer = await pc.createOffer({ offerToReceiveAudio: true });
+        const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         const sdp = preferOpus(offer.sdp ?? '');
         await pc.setLocalDescription({ type: offer.type, sdp });
         post({
@@ -167,6 +188,9 @@ export function useCall() {
       } else if (sig.kind === 'ice') {
         const pc = pcs.current.get(sig.from);
         if (pc) await pc.addIceCandidate(new RTCIceCandidate(data)).catch(() => {});
+      } else if (sig.kind === 'screen-stop') {
+        setRemoteScreenStream(null);
+        setRemoteScreenName('');
       }
     },
     [createPeer]
@@ -183,35 +207,26 @@ export function useCall() {
           lastSignalId: lastSignalId.current,
         });
         const data = await res.json();
-        if (data.kicked) {
-          setStatus('kicked');
-          cleanup();
-          return;
-        }
-        if (data.closed) {
-          setStatus('closed');
-          cleanup();
-          return;
-        }
-        const others: Peer[] = (data.participants || []).filter(
-          (p: Peer) => p.id !== userId.current
-        );
-        setPeers(data.participants || []);
+        if (data.kicked) { setStatus('kicked'); cleanup(); return; }
+        if (data.closed) { setStatus('closed'); cleanup(); return; }
+
+        const list: Peer[] = data.participants || [];
+        peersRef.current = list;
+        setPeers(list);
+
+        const others = list.filter((p) => p.id !== userId.current);
 
         for (const sig of data.signals || []) {
           lastSignalId.current = Math.max(lastSignalId.current, sig.id);
           await handleSignal(sig);
         }
 
-        // initiate connections to peers with greater id (deterministic to avoid glare)
         for (const p of others) {
           if (!pcs.current.has(p.id) && userId.current < p.id) {
             createPeer(p.id, true);
           }
         }
-      } catch {
-        /* ignore transient errors */
-      }
+      } catch { /* transient */ }
     };
     tick();
     pollTimer.current = setInterval(tick, 1500);
@@ -233,51 +248,37 @@ export function useCall() {
     stream.getAudioTracks().forEach((t) => (t.enabled = true));
   }, []);
 
-  const create = useCallback(
-    async (name: string) => {
-      setStatus('connecting');
-      stopped.current = false;
-      try {
-        await initMedia();
-        const res = await post({ action: 'create', userId: userId.current, name });
-        const data = await res.json();
-        codeRef.current = data.code;
-        setCode(data.code);
-        setIsHost(true);
-        setStatus('in-call');
-        startPolling();
-      } catch {
-        setStatus('error');
-      }
-    },
-    [initMedia, startPolling]
-  );
+  const create = useCallback(async (name: string) => {
+    setStatus('connecting');
+    stopped.current = false;
+    try {
+      await initMedia();
+      const res = await post({ action: 'create', userId: userId.current, name });
+      const data = await res.json();
+      codeRef.current = data.code;
+      setCode(data.code);
+      setIsHost(true);
+      setStatus('in-call');
+      startPolling();
+    } catch { setStatus('error'); }
+  }, [initMedia, startPolling]);
 
-  const join = useCallback(
-    async (joinCode: string, name: string) => {
-      setStatus('connecting');
-      stopped.current = false;
-      try {
-        await initMedia();
-        const res = await post({ action: 'join', code: joinCode, userId: userId.current, name });
-        if (!res.ok) {
-          setStatus(res.status === 410 ? 'closed' : 'error');
-          return false;
-        }
-        const data = await res.json();
-        codeRef.current = data.code;
-        setCode(data.code);
-        setIsHost(false);
-        setStatus('in-call');
-        startPolling();
-        return true;
-      } catch {
-        setStatus('error');
-        return false;
-      }
-    },
-    [initMedia, startPolling]
-  );
+  const join = useCallback(async (joinCode: string, name: string) => {
+    setStatus('connecting');
+    stopped.current = false;
+    try {
+      await initMedia();
+      const res = await post({ action: 'join', code: joinCode, userId: userId.current, name });
+      if (!res.ok) { setStatus(res.status === 410 ? 'closed' : 'error'); return false; }
+      const data = await res.json();
+      codeRef.current = data.code;
+      setCode(data.code);
+      setIsHost(false);
+      setStatus('in-call');
+      startPolling();
+      return true;
+    } catch { setStatus('error'); return false; }
+  }, [initMedia, startPolling]);
 
   const toggleMic = useCallback(() => {
     const next = !micOn;
@@ -286,13 +287,78 @@ export function useCall() {
     post({ action: 'mute', userId: userId.current, muted: !next });
   }, [micOn]);
 
+  // Начать демонстрацию экрана — добавить видео-трек во все активные pc
+  const startScreenShare = useCallback(async () => {
+    try {
+      const display = await (navigator.mediaDevices as MediaDevices & {
+        getDisplayMedia: (c: object) => Promise<MediaStream>;
+      }).getDisplayMedia({
+        video: {
+          frameRate: { ideal: 30, max: 60 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
+      screenStream.current = display;
+      setLocalScreenStream(display);
+      const videoTrack = display.getVideoTracks()[0];
+      if (!videoTrack) return;
+
+      // добавить трек в каждый существующий pc
+      pcs.current.forEach((pc) => {
+        const senders = pc.getSenders();
+        const videoSender = senders.find((s) => s.track?.kind === 'video');
+        if (videoSender) {
+          videoSender.replaceTrack(videoTrack);
+        } else {
+          pc.addTrack(videoTrack, display);
+        }
+      });
+
+      setSharingScreen(true);
+
+      // когда пользователь нажал «стоп» в системном UI браузера
+      videoTrack.onended = () => stopScreenShare();
+    
+    } catch { /* пользователь отменил */ }
+  }, []);
+
+  const stopScreenShare = useCallback(() => {
+    screenStream.current?.getTracks().forEach((t) => t.stop());
+    screenStream.current = null;
+    setLocalScreenStream(null);
+
+    // убрать видео-трек из всех pc
+    pcs.current.forEach((pc) => {
+      const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video');
+      if (videoSender) {
+        videoSender.replaceTrack(null).catch(() => {
+          pc.removeTrack(videoSender);
+        });
+      }
+    });
+
+    // оповестить других
+    const others = peersRef.current.filter((p) => p.id !== userId.current);
+    others.forEach((p) => {
+      post({
+        action: 'signal',
+        code: codeRef.current,
+        from: userId.current,
+        to: p.id,
+        kind: 'screen-stop',
+        payload: '{}',
+      });
+    });
+
+    setSharingScreen(false);
+  }, []);
+
   const kick = useCallback((targetId: string) => {
     post({ action: 'kick', code: codeRef.current, userId: userId.current, targetId });
     const pc = pcs.current.get(targetId);
-    if (pc) {
-      pc.close();
-      pcs.current.delete(targetId);
-    }
+    if (pc) { pc.close(); pcs.current.delete(targetId); }
   }, []);
 
   const leave = useCallback(() => {
@@ -317,9 +383,15 @@ export function useCall() {
     isHost,
     peers,
     micOn,
+    sharingScreen,
+    localScreenStream,
+    remoteScreenStream,
+    remoteScreenName,
     create,
     join,
     toggleMic,
+    startScreenShare,
+    stopScreenShare,
     kick,
     leave,
   };
