@@ -10,6 +10,7 @@ const Index = () => {
   const [joinCode, setJoinCode] = useState('');
   const [showCode, setShowCode] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [joinError, setJoinError] = useState<'private' | 'not_found' | null>(null);
 
   const call = useCall();
   const inCall = call.status === 'in-call' || call.status === 'connecting';
@@ -28,9 +29,12 @@ const Index = () => {
   };
 
   const doJoin = async () => {
+    setJoinError(null);
     setBusy(true);
-    await call.join(joinCode, nickname.trim());
+    const result = await call.join(joinCode, nickname.trim());
     setBusy(false);
+    if (result === 'private') setJoinError('private');
+    else if (result === 'error' || result === 'closed') setJoinError('not_found');
   };
 
   const handleLeave = () => {
@@ -104,7 +108,16 @@ const Index = () => {
 
         {!inCall && call.status === 'idle' && screen === 'name-join' && (
           <div className="w-full max-w-md mt-8">
-            <NameForm title="Как вас называть?" subtitle="Ник действует только на этот звонок." value={nickname} onChange={setNickname} onBack={() => setScreen('join-code')} onSubmit={doJoin} busy={busy} />
+            <NameForm
+              title="Как вас называть?"
+              subtitle="Ник действует только на этот звонок."
+              value={nickname}
+              onChange={(v) => { setNickname(v); setJoinError(null); }}
+              onBack={() => { setScreen('join-code'); setJoinError(null); }}
+              onSubmit={doJoin}
+              busy={busy}
+              error={joinError === 'private' ? 'Этот звонок приватный — хозяин закрыл вход для новых участников.' : joinError === 'not_found' ? 'Звонок не найден или уже завершён.' : null}
+            />
           </div>
         )}
       </main>
@@ -229,6 +242,16 @@ const CallView = ({ call, showCode, setShowCode, onLeave, busy }: {
           </button>
         )}
 
+        {call.isHost && showCode && (
+          <button
+            onClick={call.togglePrivate}
+            className={`flex items-center gap-2 px-5 py-3 rounded-xl font-bold transition ${call.isPrivate ? 'bg-orange-100 text-orange-700 hover:bg-orange-200' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+          >
+            <Icon name={call.isPrivate ? 'LockOpen' : 'Lock'} size={18} />
+            {call.isPrivate ? 'Снять приватность' : 'Сделать приватным'}
+          </button>
+        )}
+
         <button onClick={onLeave} className="flex items-center gap-2 px-5 py-3 rounded-xl font-bold bg-red-500 text-white hover:bg-red-600 transition">
           <Icon name="PhoneOff" size={18} />
           Выйти
@@ -238,14 +261,26 @@ const CallView = ({ call, showCode, setShowCode, onLeave, busy }: {
       {/* код звонка */}
       {call.isHost && showCode && call.code && (
         <div className="bg-slate-900 rounded-2xl p-6 mb-6 text-center animate-fade-in">
-          <p className="text-slate-400 text-sm mb-2">Код этого звонка — поделитесь им</p>
+          <div className="flex items-center justify-center gap-2 mb-2">
+            <p className="text-slate-400 text-sm">Код этого звонка — поделитесь им</p>
+            {call.isPrivate && (
+              <span className="flex items-center gap-1 bg-orange-500/20 text-orange-400 text-xs font-bold px-2 py-0.5 rounded-full">
+                <Icon name="Lock" size={11} />
+                приватный
+              </span>
+            )}
+          </div>
           <div className="flex items-center justify-center gap-3">
             <span className="font-mono text-2xl md:text-3xl tracking-[0.25em] text-lime-400 font-bold">{call.code}</span>
             <button onClick={() => navigator.clipboard?.writeText(call.code)} className="text-slate-400 hover:text-white transition" title="Скопировать">
               <Icon name="Copy" size={20} />
             </button>
           </div>
-          <p className="text-slate-500 text-xs mt-3">После выхода создателя код перестанет работать.</p>
+          <p className="text-slate-500 text-xs mt-3">
+            {call.isPrivate
+              ? 'Новые участники не смогут войти, пока приватность включена.'
+              : 'После выхода создателя код перестанет работать.'}
+          </p>
         </div>
       )}
 
@@ -343,16 +378,23 @@ const BackButton = ({ onClick }: { onClick: () => void }) => (
   </button>
 );
 
-const NameForm = ({ title, subtitle, value, onChange, onBack, onSubmit, busy }: {
+const NameForm = ({ title, subtitle, value, onChange, onBack, onSubmit, busy, error }: {
   title: string; subtitle: string; value: string;
   onChange: (v: string) => void; onBack: () => void; onSubmit: () => void; busy: boolean;
+  error?: string | null;
 }) => (
   <div className="animate-scale-in">
     <BackButton onClick={onBack} />
     <h2 className="text-3xl font-black tracking-tight mb-2">{title}</h2>
     <p className="text-slate-500 mb-8">{subtitle}</p>
-    <input autoFocus value={value} onChange={(e) => onChange(e.target.value.slice(0, 20))} onKeyDown={(e) => { if (e.key === 'Enter' && value.trim()) onSubmit(); }} placeholder="Например, Тихий слайм" className="w-full text-lg bg-slate-50 border-2 border-slate-200 rounded-2xl px-5 py-5 outline-none focus:border-lime-400 transition mb-6" />
-    <button disabled={!value.trim() || busy} onClick={onSubmit} className="w-full bg-slate-900 text-white py-5 rounded-2xl font-bold text-lg hover:bg-slate-800 transition disabled:opacity-30 disabled:cursor-not-allowed">
+    {error && (
+      <div className="flex items-start gap-3 bg-orange-50 border border-orange-200 text-orange-700 rounded-2xl px-4 py-4 mb-6 animate-fade-in">
+        <Icon name="Lock" size={18} className="shrink-0 mt-0.5" />
+        <p className="text-sm font-medium">{error}</p>
+      </div>
+    )}
+    <input autoFocus value={value} onChange={(e) => onChange(e.target.value.slice(0, 20))} onKeyDown={(e) => { if (e.key === 'Enter' && value.trim() && !error) onSubmit(); }} placeholder="Например, Тихий слайм" className="w-full text-lg bg-slate-50 border-2 border-slate-200 rounded-2xl px-5 py-5 outline-none focus:border-lime-400 transition mb-6" />
+    <button disabled={!value.trim() || busy || !!error} onClick={onSubmit} className="w-full bg-slate-900 text-white py-5 rounded-2xl font-bold text-lg hover:bg-slate-800 transition disabled:opacity-30 disabled:cursor-not-allowed">
       {busy ? 'Подключение…' : 'Продолжить'}
     </button>
   </div>

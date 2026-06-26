@@ -61,6 +61,7 @@ export function useCall() {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [micOn, setMicOn] = useState(true);
   const [sharingScreen, setSharingScreen] = useState(false);
+  const [isPrivate, setIsPrivate] = useState(false);
   const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
   const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
   const [remoteScreenName, setRemoteScreenName] = useState('');
@@ -263,21 +264,29 @@ export function useCall() {
     } catch { setStatus('error'); }
   }, [initMedia, startPolling]);
 
-  const join = useCallback(async (joinCode: string, name: string) => {
+  const join = useCallback(async (joinCode: string, name: string): Promise<'ok' | 'closed' | 'private' | 'error'> => {
     setStatus('connecting');
     stopped.current = false;
     try {
       await initMedia();
       const res = await post({ action: 'join', code: joinCode, userId: userId.current, name });
-      if (!res.ok) { setStatus(res.status === 410 ? 'closed' : 'error'); return false; }
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const errCode = errData.error;
+        if (res.status === 410) { setStatus('idle'); return 'closed'; }
+        if (res.status === 403 && errCode === 'private') { setStatus('idle'); return 'private'; }
+        if (res.status === 404) { setStatus('idle'); return 'error'; }
+        setStatus('idle');
+        return 'error';
+      }
       const data = await res.json();
       codeRef.current = data.code;
       setCode(data.code);
       setIsHost(false);
       setStatus('in-call');
       startPolling();
-      return true;
-    } catch { setStatus('error'); return false; }
+      return 'ok';
+    } catch { setStatus('idle'); return 'error'; }
   }, [initMedia, startPolling]);
 
   const toggleMic = useCallback(() => {
@@ -355,6 +364,12 @@ export function useCall() {
     setSharingScreen(false);
   }, []);
 
+  const togglePrivate = useCallback(async () => {
+    const next = !isPrivate;
+    setIsPrivate(next);
+    await post({ action: 'set_private', code: codeRef.current, userId: userId.current, private: next });
+  }, [isPrivate]);
+
   const kick = useCallback((targetId: string) => {
     post({ action: 'kick', code: codeRef.current, userId: userId.current, targetId });
     const pc = pcs.current.get(targetId);
@@ -384,6 +399,7 @@ export function useCall() {
     peers,
     micOn,
     sharingScreen,
+    isPrivate,
     localScreenStream,
     remoteScreenStream,
     remoteScreenName,
@@ -392,6 +408,7 @@ export function useCall() {
     toggleMic,
     startScreenShare,
     stopScreenShare,
+    togglePrivate,
     kick,
     leave,
   };

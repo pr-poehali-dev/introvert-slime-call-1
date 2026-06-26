@@ -4,7 +4,7 @@
       "name": "Create room",
       "method": "POST",
       "path": "/",
-      "body": {"action": "create", "userId": "test-host-1", "name": "Хост"},
+      "body": {"action": "create", "userId": "test-host-auto-9x7z", "name": "Хост"},
       "expectedStatus": 200,
       "expectedBody": {"code": "string"},
       "bodyMatcher": "partial"
@@ -15,6 +15,13 @@
       "path": "/",
       "body": {"action": "join", "code": "ZZZZZZZZZZZZ", "userId": "test-guest-1", "name": "Гость"},
       "expectedStatus": 404
+    },
+    {
+      "name": "Set private forbidden (wrong host)",
+      "method": "POST",
+      "path": "/",
+      "body": {"action": "set_private", "code": "ZZZZZZZZZZZZ", "userId": "nobody", "private": true},
+      "expectedStatus": 403
     },
     {
       "name": "Unknown action",

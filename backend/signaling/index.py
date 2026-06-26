@@ -55,18 +55,37 @@ def handler(event: dict, context) -> dict:
             code = (body.get('code') or '').upper()[:12]
             user_id = body['userId']
             name = (body.get('name') or 'Гость')[:40]
-            cur.execute("SELECT closed FROM rooms WHERE code = %s", (code,))
+            cur.execute("SELECT closed, private FROM rooms WHERE code = %s", (code,))
             row = cur.fetchone()
             if row is None:
                 return _resp(404, {'error': 'not_found'})
             if row[0]:
                 return _resp(410, {'error': 'closed'})
+            if row[1]:
+                # приватный — разрешить только если уже был участником
+                cur.execute(
+                    "SELECT id FROM participants WHERE id = %s AND room_code = %s AND kicked = FALSE",
+                    (user_id, code),
+                )
+                if not cur.fetchone():
+                    return _resp(403, {'error': 'private'})
             cur.execute(
                 "INSERT INTO participants (id, room_code, name) VALUES (%s, %s, %s) "
                 "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, active = TRUE, kicked = FALSE",
                 (user_id, code, name),
             )
             return _resp(200, {'code': code})
+
+        if action == 'set_private':
+            code = (body.get('code') or '').upper()[:12]
+            host_id = body['userId']
+            cur.execute("SELECT host_id FROM rooms WHERE code = %s", (code,))
+            row = cur.fetchone()
+            if not row or row[0] != host_id:
+                return _resp(403, {'error': 'forbidden'})
+            private = bool(body.get('private'))
+            cur.execute("UPDATE rooms SET private = %s WHERE code = %s", (private, code))
+            return _resp(200, {'ok': True, 'private': private})
 
         if action == 'poll':
             code = (body.get('code') or '').upper()[:12]
